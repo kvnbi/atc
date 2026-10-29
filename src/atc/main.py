@@ -12,6 +12,7 @@ from atc.bridge.xplane import XPlane
 from atc.config import ROOT, get_settings
 from atc.context.builder import ContextBuilder
 from atc.data import airports
+from atc.events import Watcher, watch
 from atc.llm.client import LLM
 from atc.llm.data_tools import data_tools
 from atc.llm.tools import core_tools
@@ -42,6 +43,7 @@ def _args(argv):
     parser.add_argument("--no-replay", action="store_true")
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--fresh", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -75,7 +77,41 @@ async def main(argv=None):
     llm = LLM(settings=settings)
     validator = Validator(lambda: scope)
     tools = core_tools(notes_path, say, validator) + data_tools(store.snapshot)
+    lock = asyncio.Lock()
+
+    async def turn(call=None, event=None):
+        async with lock:
+            if tracker.resolve() is None:
+                if call:
+                    khz = store.snapshot().aircraft.com1_khz
+                    print(f"[no controller on {khz / 1000:.3f}]" if khz else "[no frequency tuned]")
+                return
+            if event:
+                print(f"[event: {event}]")
+            said.clear()
+            validator.begin()
+            system, messages = builder.build(
+                store.snapshot(), flight_notes.load(notes_path), call=call, event=event
+            )
+            start = time.perf_counter()
+            try:
+                result = await llm.run(system, messages, tools)
+            except anthropic.APIError as e:
+                print(f"error: {e}")
+                return
+            elapsed = time.perf_counter() - start
+            for text, problems in validator.history:
+                print(f"[rejected: {text!r}: {'; '.join(problems)}]")
+            if not said:
+                print("[silence]")
+            print(
+                f"[{result.stop_reason}, {result.steps} steps, {elapsed:.1f}s, "
+                f"in {result.input_tokens} out {result.output_tokens} "
+                f"cache read {result.cache_read_tokens} write {result.cache_write_tokens}]"
+            )
+
     source, task = _source(args, settings, store)
+    watcher = None if args.quiet else asyncio.create_task(watch(Watcher(tracker, store, notes_path, lambda: scope), turn))
     await asyncio.sleep(0)
     try:
         while True:
@@ -98,35 +134,12 @@ async def main(argv=None):
             if source and not source.connected:
                 print("[no data from X-Plane]")
                 continue
-            if tracker.resolve() is None:
-                khz = store.snapshot().aircraft.com1_khz
-                print(f"[no controller on {khz / 1000:.3f}]" if khz else "[no frequency tuned]")
-                continue
-            said.clear()
-            validator.begin()
-            system, messages = builder.build(
-                store.snapshot(), flight_notes.load(notes_path), call=line
-            )
-            start = time.perf_counter()
-            try:
-                result = await llm.run(system, messages, tools)
-            except anthropic.APIError as e:
-                print(f"error: {e}")
-                continue
-            elapsed = time.perf_counter() - start
-            for text, problems in validator.history:
-                print(f"[rejected: {text!r}: {'; '.join(problems)}]")
-            if not said:
-                print("[silence]")
-            print(
-                f"[{result.stop_reason}, {result.steps} steps, {elapsed:.1f}s, "
-                f"in {result.input_tokens} out {result.output_tokens} "
-                f"cache read {result.cache_read_tokens} write {result.cache_write_tokens}]"
-            )
+            await turn(call=line)
     finally:
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        for background in (task, watcher):
+            if background:
+                background.cancel()
+                await asyncio.gather(background, return_exceptions=True)
 
 
 def run():
