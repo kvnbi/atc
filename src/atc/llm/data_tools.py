@@ -1,5 +1,7 @@
 import asyncio
 
+from atc import spoken
+from atc.context.hints import crossed
 from atc.data import airports, nav, taxi, weather
 from atc.geo import range_bearing
 from atc.llm.tools import Tool
@@ -29,16 +31,16 @@ def taxi_tool(snapshot):
         aircraft = snapshot().aircraft
         route = taxi.plan(_airport(icao), aircraft.lat, aircraft.lon, origin, destination)
         return {
-            "taxiways": list(route.taxiways),
-            "crossings": list(route.crossings),
-            "hold_short_runway": route.runway,
+            "taxiways": [spoken.taxiway(t) for t in route.taxiways],
+            "crossings": [crossed(c) for c in route.crossings],
+            "hold_short_runway": spoken.runway(route.runway) if route.runway else "",
             "distance_ft": route.distance_ft,
         }
 
     return Tool(
         "get_taxi_route",
         "Taxi route on the airport surface. origin is a parking name, or empty for the aircraft position. "
-        "destination is a runway such as 28R or a parking name. Returns taxiways in order, runway pairs "
+        "destination is a runway such as 28R or a parking name. Returns taxiways in order, already in spoken words, runways "
         "the route crosses (hold short of each until cleared to cross), the runway to hold short of at "
         "the end, and the distance in feet.",
         _object(icao=STRING, origin=STRING, destination=STRING),
@@ -78,13 +80,7 @@ def procedure_tool():
 
 def weather_tool():
     async def handler(icao):
-        out = weather.parse(await asyncio.to_thread(weather.fetch, icao))
-        airport = airports.find(icao)
-        if airport and out.get("wind_true") is not None:
-            heading = (out["wind_true"] - weather.variation(airport)) % 360
-            out["wind_magnetic_est"] = round(heading / 10) * 10 % 360 or 360
-            out["runways"] = weather.rank(airport, out["wind_true"], out["wind_kt"])
-        return out
+        return weather.summarize(await asyncio.to_thread(weather.fetch, icao), airports.find(icao))
 
     return Tool(
         "get_weather",

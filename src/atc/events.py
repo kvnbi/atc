@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 
 from atc import notes as flight_notes
-from atc.data import taxi
+from atc.data import centers, taxi
 from atc.data.airports import FT_PER_NM
 from atc.geo import range_bearing
 from atc.state.models import Position
@@ -17,6 +17,7 @@ CLIMB_AGL_FT = 500
 TOWER_AREA_NM = 10
 CENTER_NM = 30
 APPROACH_NM = 40
+ARRIVAL_NM = 25
 FINAL_HANDOFF_NM = 8
 FINAL_HANDOFF_AGL_FT = 3500
 DEVIATION_FT = 300
@@ -30,6 +31,8 @@ FINAL_CROSS_NM = 0.4
 FINAL_AGL_FT = 2500
 RUNWAY_CROSS_NM = 0.03
 ASSIGNED = re.compile(r"\b(?:maintain|altitude)\s+(FL)?(\d{3,5})\b", re.I)
+APPROACH_ISSUED = re.compile(r"\b(?:approach|ils|visual|rnav)\b", re.I)
+LANDING_ISSUED = re.compile(r"\bland(?:ing)?\b", re.I)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,8 +61,20 @@ def _final_distance(end, airport, craft):
     along, cross = _frame(end, craft.lat, craft.lon)
     low = craft.alt_msl_ft - airport.elevation_ft < FINAL_AGL_FT
     if not craft.on_ground and low and -FINAL_NM <= along < 0 and abs(cross) <= FINAL_CROSS_NM:
-        return -along
+        return -along, abs(cross)
     return None
+
+
+def _best_final(ends, airport, craft):
+    options = []
+    for end, length_nm in ends:
+        found = _final_distance(end, airport, craft)
+        if found:
+            options.append((found[1], found[0], end, length_nm))
+    if not options:
+        return None
+    _, out, end, length_nm = min(options, key=lambda o: o[0])
+    return end, length_nm, out
 
 
 def _name(craft):
@@ -74,8 +89,22 @@ def _assigned(notes):
     return None
 
 
+def _issued(notes, pattern):
+    return any(pattern.search(line) for line in notes.clearances)
+
+
 class Watcher:
-    __slots__ = ("_tracker", "_store", "_notes_path", "_scope", "_active", "_since", "_touched", "_airborne")
+    __slots__ = (
+        "_tracker",
+        "_store",
+        "_notes_path",
+        "_scope",
+        "_active",
+        "_since",
+        "_touched",
+        "_airborne",
+        "_sector",
+    )
 
     def __init__(self, tracker, store, notes_path, scope):
         self._tracker = tracker
@@ -86,6 +115,7 @@ class Watcher:
         self._since = {}
         self._touched = set()
         self._airborne = False
+        self._sector = None
 
     def poll(self, now=None):
         now = time.monotonic() if now is None else now
@@ -94,15 +124,23 @@ class Watcher:
         snap = self._store.snapshot()
         a = snap.aircraft
         landed = a.on_ground and self._airborne and a.ground_speed_kt < LANDED_KT
+        changed = False
+        if position is Position.CENTER:
+            here = centers.sector(a.lat, a.lon)
+            changed = self._sector is not None and here != self._sector
+            self._sector = here
+        else:
+            self._sector = None
         found = {}
         airports = self._scope()
         if position is not None and airports:
             notes = flight_notes.load(self._notes_path)
             for source in (
-                self._handoffs(snap, airports, landed),
+                self._handoffs(snap, airports, landed, changed),
+                self._arrival(snap, airports, notes),
                 self._deviation(snap, notes, now),
                 self._readbacks(notes, now),
-                self._runways(snap, airports),
+                self._runways(snap, airports, notes),
             ):
                 found.update(source)
         if not a.on_ground and a.alt_agl_ft > 50:
@@ -121,7 +159,7 @@ class Watcher:
         start = self._since.setdefault(key, now)
         return now - start >= seconds
 
-    def _handoffs(self, snap, airports, landed):
+    def _handoffs(self, snap, airports, landed, changed):
         a, position = snap.aircraft, snap.position
         airport, nm = min(
             ((ap, range_bearing(a.lat, a.lon, ap.lat, ap.lon)[0]) for ap in airports),
@@ -129,6 +167,7 @@ class Watcher:
         )
         dest = airports[-1]
         dest_nm = range_bearing(a.lat, a.lon, dest.lat, dest.lon)[0]
+        center = f"{centers.frequency(a.lat, a.lon) / 1000:.3f}"
         if position is Position.GROUND and a.on_ground and a.ground_speed_kt < STOPPED_KT:
             g = taxi.graph(airport)
             near = min(
@@ -168,14 +207,21 @@ class Watcher:
             yield (
                 "handoff:center",
                 f"The aircraft is {nm:.0f} nm from {airport.icao} and leaving departure airspace. "
-                "Hand it off to center.",
+                f"Hand it off to center on {center}.",
             )
-        elif position is Position.CENTER and not a.on_ground and dest_nm < APPROACH_NM:
-            yield (
-                "handoff:approach",
-                f"The aircraft is {dest_nm:.0f} nm from {dest.icao}. Hand it off to approach on "
-                f"{_freq(dest, 'approach')}.",
-            )
+        elif position is Position.CENTER and not a.on_ground:
+            if changed:
+                yield (
+                    f"handoff:sector:{centers.sector(a.lat, a.lon)}",
+                    f"The aircraft has entered a new center sector. Hand it off to the next center "
+                    f"controller on {center}.",
+                )
+            elif dest_nm < APPROACH_NM:
+                yield (
+                    "handoff:approach",
+                    f"The aircraft is {dest_nm:.0f} nm from {dest.icao}. Hand it off to approach on "
+                    f"{_freq(dest, 'approach')}.",
+                )
         elif (
             position is Position.APPROACH
             and not a.on_ground
@@ -186,6 +232,24 @@ class Watcher:
                 "handoff:final",
                 f"The aircraft is {dest_nm:.1f} nm from {dest.icao} at {a.alt_agl_ft:.0f} ft above "
                 f"ground. If it is established on final, hand it off to tower on {_freq(dest, 'tower')}.",
+            )
+
+    def _arrival(self, snap, airports, notes):
+        a = snap.aircraft
+        dest = airports[-1]
+        dest_nm = range_bearing(a.lat, a.lon, dest.lat, dest.lon)[0]
+        if (
+            snap.position is Position.APPROACH
+            and not a.on_ground
+            and dest_nm < ARRIVAL_NM
+            and not _issued(notes, APPROACH_ISSUED)
+        ):
+            yield (
+                "approach:clearance",
+                f"The aircraft is {dest_nm:.0f} nm from {dest.icao} at {a.alt_msl_ft:.0f} ft. Sequence "
+                "it for arrival: check get_weather for the active runway and get_procedure for the "
+                "arrival and approach, then give descent, vectors or the published arrival and the "
+                "approach clearance.",
             )
 
     def _deviation(self, snap, notes, now):
@@ -211,35 +275,42 @@ class Watcher:
                 if self._held(key, True, now, seconds):
                     yield key, f"No readback has been received for: {line}. Ask the pilot to read it back."
 
-    def _runways(self, snap, airports):
+    def _runways(self, snap, airports, notes):
         a = snap.aircraft
         if snap.position not in (Position.TOWER, Position.APPROACH):
             return
         for airport in airports:
             if range_bearing(a.lat, a.lon, airport.lat, airport.lon)[0] > RUNWAY_AREA_NM:
                 continue
-            for runway in airport.runways:
-                length_nm = runway.length_ft / FT_PER_NM
-                for end in runway.ends:
-                    out = _final_distance(end, airport, a)
-                    if out is not None and a.vertical_speed_fpm <= DEVIATION_FPM:
-                        busy = [t for t in snap.traffic if _on_runway(end, length_nm, t)]
-                        if busy:
-                            who = ", ".join(_name(t) for t in busy)
-                            yield (
-                                f"runway:{end.name}:occupied",
-                                f"Runway {end.name} is occupied by {who} while the aircraft is {out:.1f} nm "
-                                "out on final. If it is not clear, send the aircraft around.",
-                            )
-                    if _on_runway(end, length_nm, a):
-                        for t in snap.traffic:
-                            out = _final_distance(end, airport, t)
-                            if out is not None:
-                                yield (
-                                    f"runway:{end.name}:traffic",
-                                    f"{_name(t)} is {out:.1f} nm out on final for runway {end.name} while the "
-                                    f"aircraft is still on the runway. Clear the runway or send {_name(t)} around.",
-                                )
+            ends = [(e, r.length_ft / FT_PER_NM) for r in airport.runways for e in r.ends]
+            own = _best_final(ends, airport, a)
+            if own and a.vertical_speed_fpm <= DEVIATION_FPM:
+                end, length_nm, out = own
+                busy = [t for t in snap.traffic if _on_runway(end, length_nm, t)]
+                if busy:
+                    who = ", ".join(_name(t) for t in busy)
+                    yield (
+                        f"runway:{end.name}:occupied",
+                        f"Runway {end.name} is occupied by {who} while the aircraft is {out:.1f} nm "
+                        "out on final. If it is not clear, send the aircraft around.",
+                    )
+                elif snap.position is Position.TOWER and not _issued(notes, LANDING_ISSUED):
+                    yield (
+                        f"landing:{end.name}",
+                        f"The aircraft is {out:.1f} nm out on final for runway {end.name} and the "
+                        "runway is clear. Issue the landing clearance with the wind.",
+                    )
+            for end, length_nm in ends:
+                if not _on_runway(end, length_nm, a):
+                    continue
+                for t in snap.traffic:
+                    found = _best_final(ends, airport, t)
+                    if found and found[0] == end:
+                        yield (
+                            f"runway:{end.name}:traffic",
+                            f"{_name(t)} is {found[2]:.1f} nm out on final for runway {end.name} while the "
+                            f"aircraft is still on the runway. Clear the runway or send {_name(t)} around.",
+                        )
 
 
 async def watch(watcher, turn, interval=1.0):

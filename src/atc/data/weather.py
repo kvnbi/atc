@@ -66,3 +66,22 @@ def rank(airport, direction, speed):
             )
     rows.sort(key=lambda r: -r["headwind_kt"])
     return rows[:4]
+
+
+def summarize(metar, airport=None):
+    out = parse(metar)
+    if airport and out.get("wind_true") is not None:
+        heading = (out["wind_true"] - variation(airport)) % 360
+        out["wind_magnetic_est"] = round(heading / 10) * 10 % 360 or 360
+        out["runways"] = rank(airport, out["wind_true"], out["wind_kt"])
+    return out
+
+
+def brief(out):
+    parts = [out["metar"]]
+    if "wind_magnetic_est" in out:
+        best = ", ".join(
+            f"{r['runway']} (head {r['headwind_kt']}, cross {r['crosswind_kt']})" for r in out["runways"][:3]
+        )
+        parts.append(f"Wind magnetic about {out['wind_magnetic_est']:03d} at {out['wind_kt']} kt. Best runways: {best}.")
+    return " ".join(parts)

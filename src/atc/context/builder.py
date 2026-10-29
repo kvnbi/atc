@@ -1,8 +1,10 @@
 from atc import notes as flight_notes
+from atc import spoken
 from atc.context.system import system_prompt
 from atc.geo import range_bearing
 
-MAX_TRAFFIC = 8
+MAX_TRAFFIC = 5
+LOG_LINES = 12
 
 
 def _freq(khz):
@@ -35,6 +37,16 @@ def _traffic(aircraft, traffic):
     return "Traffic (nearest first):\n" + "\n".join(lines) if lines else "Traffic: none"
 
 
+def _notes(notes):
+    lines = []
+    for name in flight_notes.NAMES:
+        items = getattr(notes, name)[-LOG_LINES:] if name == "log" else getattr(notes, name)
+        if items:
+            lines.append(f"{name.capitalize()}:")
+            lines += [f"- {item}" for item in items]
+    return "Flight notes:\n" + "\n".join(lines) if lines else "Flight notes: empty"
+
+
 class ContextBuilder:
     __slots__ = ("_system",)
 
@@ -43,16 +55,20 @@ class ContextBuilder:
         if flight_plan:
             self._system.append(f"Flight plan\n{flight_plan.strip()}")
 
-    def build(self, snapshot, notes, call=None, event=None, weather=""):
+    def build(self, snapshot, notes, call=None, event=None, weather="", hint=""):
         if not (call or event):
             raise ValueError("call or event required")
+        callsign = snapshot.aircraft.callsign
         parts = [
             f"Position: {snapshot.position.value}, tuned frequency {_freq(snapshot.aircraft.com1_khz)}",
+            *([f"Callsign to speak: {spoken.spell(callsign)}"] if callsign else []),
             _aircraft(snapshot.aircraft),
             _traffic(snapshot.aircraft, snapshot.traffic),
         ]
         if weather:
             parts.append(f"Weather\n{weather.strip()}")
-        parts.append(flight_notes.dumps(notes).strip())
+        if hint:
+            parts.append(hint)
+        parts.append(_notes(notes))
         parts.append(f'Pilot: "{call.strip()}"' if call else f"Event: {event.strip()}")
         return list(self._system), [{"role": "user", "content": "\n\n".join(parts)}]

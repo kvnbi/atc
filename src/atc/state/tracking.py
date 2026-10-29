@@ -1,3 +1,4 @@
+from atc.data import centers
 from atc.state.models import Position
 
 ROLES = (
@@ -9,11 +10,13 @@ ROLES = (
 )
 
 
-def position_for(airports, khz):
+def position_for(airports, khz, lat=None, lon=None):
     for airport in airports:
         for role, position in ROLES:
             if khz in airport.frequencies.get(role, ()):
                 return position
+    if lat is not None and khz == centers.frequency(lat, lon):
+        return Position.CENTER
     return None
 
 
@@ -29,6 +32,7 @@ class Tracker:
         if self.fixed is not None:
             position = Position(self.fixed)
         else:
-            position = position_for(self._scope(), self._store.snapshot().aircraft.com1_khz)
+            a = self._store.snapshot().aircraft
+            position = position_for(self._scope(), a.com1_khz, a.lat, a.lon)
         self._store.set_position(position)
         return position

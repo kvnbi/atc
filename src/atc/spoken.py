@@ -211,3 +211,12 @@ def normalize(text):
     text = re.sub(r"(?<=\d)-(?=\d)", " ", text)
     text = re.sub(r"\b\d+\b", _integer, text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def taxiway(name):
+    return " ".join(LETTER_WORDS[c] if c.isalpha() else DIGIT_WORDS[int(c)] for c in name.upper() if c.isalnum())
+
+
+def runway(name):
+    side = SIDE_WORDS.get(name[-1:].upper())
+    return f"{_digits(name[:-1] if side else name)}{' ' + side if side else ''}"

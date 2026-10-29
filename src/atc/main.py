@@ -7,13 +7,16 @@ import time
 import anthropic
 
 from atc import notes as flight_notes
+from atc import spoken
 from atc.audio.ptt import Recorder, Toggle, utterances
 from atc.bridge.replay import Replay
 from atc.bridge.xplane import XPlane
 from atc.config import ROOT, get_settings
 from atc.context.builder import ContextBuilder
-from atc.data import airports
+from atc.context.hints import taxi_hint
+from atc.data import airports, weather
 from atc.events import Watcher, watch
+from atc.latency import TARGET_SECONDS, LatencyLog, describe
 from atc.llm.client import LLM
 from atc.llm.data_tools import data_tools
 from atc.llm.tools import core_tools
@@ -23,6 +26,7 @@ from atc.state.tracking import Tracker
 from atc.validator import Validator
 
 SAMPLE = ROOT / "samples" / "ground_to_takeoff.jsonl"
+WEATHER_SECONDS = 300
 
 
 def _scope(flight_plan):
@@ -78,12 +82,23 @@ async def main(argv=None):
 
         speaker = Speaker()
 
+    latency = LatencyLog(settings.data_dir / "latency.jsonl")
+    current = {"watch": None}
+
     def say(text):
         said.append(text)
         position = store.snapshot().position
         print(f"\n{position.value.upper()}: {text}\n")
+        watch_ = current["watch"]
+        if watch_ is None:
+            if speaker:
+                speaker.say(text, position)
+            return
+        watch_.mark("transmit")
         if speaker:
-            speaker.say(text, position)
+            speaker.say(text, position, current["heard"])
+        else:
+            current["heard"]()
 
     scope = _scope(args.flight_plan)
     tracker = Tracker(store, lambda: scope, args.position)
@@ -93,7 +108,22 @@ async def main(argv=None):
     tools = core_tools(notes_path, say, validator) + data_tools(store.snapshot)
     lock = asyncio.Lock()
 
-    async def turn(call=None, event=None):
+    forecasts = {}
+    summaries = {}
+
+    async def refresh_weather():
+        while True:
+            for airport in scope[:2]:
+                try:
+                    metar = await asyncio.to_thread(weather.fetch, airport.icao)
+                    summaries[airport.icao] = weather.summarize(metar, airport)
+                    forecasts[airport.icao] = weather.brief(summaries[airport.icao])
+                except Exception:
+                    forecasts.pop(airport.icao, None)
+                    summaries.pop(airport.icao, None)
+            await asyncio.sleep(WEATHER_SECONDS)
+
+    async def turn(call=None, event=None, released=None, transcribed=None):
         async with lock:
             if tracker.resolve() is None:
                 if call:
@@ -104,8 +134,30 @@ async def main(argv=None):
                 print(f"[event: {event}]")
             said.clear()
             validator.begin()
+            watch_ = latency.stopwatch("call" if call else "event", released)
+            if transcribed:
+                watch_.mark("transcribed", transcribed)
+
+            def heard():
+                watch_.mark("audio")
+                record = watch_.finish()
+                if record:
+                    print(describe(record))
+
+            current["watch"], current["heard"] = watch_, heard
+            llm.on_request = lambda: watch_.mark("model")
+            if speaker:
+                llm.on_tool_start = lambda name: name == "transmit" and speaker.begin(
+                    store.snapshot().position, heard
+                )
+            snapshot = store.snapshot()
             system, messages = builder.build(
-                store.snapshot(), flight_notes.load(notes_path), call=call, event=event
+                snapshot,
+                flight_notes.load(notes_path),
+                call=call,
+                event=event,
+                weather="\n".join(forecasts.values()),
+                hint=taxi_hint(scope, snapshot, summaries),
             )
             start = time.perf_counter()
             try:
@@ -113,6 +165,9 @@ async def main(argv=None):
             except anthropic.APIError as e:
                 print(f"error: {e}")
                 return
+            finally:
+                if speaker:
+                    speaker.end_turn()
             elapsed = time.perf_counter() - start
             for text, problems in validator.history:
                 print(f"[rejected: {text!r}: {'; '.join(problems)}]")
@@ -130,6 +185,10 @@ async def main(argv=None):
         background.append(asyncio.create_task(watch(Watcher(tracker, store, notes_path, lambda: scope), turn)))
     if speaker:
         background.append(asyncio.create_task(speaker.run()))
+        if args.callsign:
+            background.append(asyncio.create_task(speaker.prepare(spoken.spell(args.callsign))))
+    if scope:
+        background.append(asyncio.create_task(refresh_weather()))
     toggle = None
     if args.listen:
         from atc.audio.stt import Transcriber, vocabulary
@@ -145,10 +204,11 @@ async def main(argv=None):
 
         async def listen():
             async for pcm in utterances(held, Recorder()):
+                released = time.monotonic()
                 text = await asyncio.to_thread(transcriber.transcribe, pcm, prompt)
                 if text:
                     print(f"PILOT: {text}")
-                    await turn(call=text)
+                    await turn(call=text, released=released, transcribed=time.monotonic())
 
         background.append(asyncio.create_task(listen()))
         print("[ready, type /talk then Enter to send, or hold the joystick button]")
@@ -192,6 +252,9 @@ async def main(argv=None):
         for outcome in await asyncio.gather(*running, return_exceptions=True):
             if isinstance(outcome, Exception):
                 print(f"[task failed: {outcome!r}]")
+        median = latency.median()
+        if median is not None:
+            print(f"[median latency {median:.1f}s over {len(latency.records)} replies, target {TARGET_SECONDS}s]")
 
 
 def run():

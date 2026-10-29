@@ -41,7 +41,7 @@ async def _call(tools, block):
 
 
 class LLM:
-    __slots__ = ("_client", "_model", "_max_steps", "_max_tokens", "_effort")
+    __slots__ = ("_client", "_model", "_max_steps", "_max_tokens", "_effort", "_thinking", "on_request", "on_tool_start")
 
     def __init__(self, client=None, settings=None, max_tokens=2048):
         settings = settings or get_settings()
@@ -50,6 +50,30 @@ class LLM:
         self._max_steps = settings.max_tool_steps
         self._max_tokens = max_tokens
         self._effort = settings.effort
+        self._thinking = settings.thinking
+        self.on_request = None
+        self.on_tool_start = None
+
+    async def _stream(self, messages, request, by_name):
+        started = {}
+        try:
+            async with self._client.messages.stream(messages=messages, **request) as stream:
+                async for event in stream:
+                    if (
+                        event.type == "content_block_start"
+                        and event.content_block.type == "tool_use"
+                        and self.on_tool_start
+                    ):
+                        self.on_tool_start(event.content_block.name)
+                    elif event.type == "content_block_stop" and event.content_block.type == "tool_use":
+                        block = event.content_block
+                        started[block.id] = asyncio.create_task(_call(by_name, block))
+                response = await stream.get_final_message()
+        except BaseException:
+            for task in started.values():
+                task.cancel()
+            raise
+        return response, started
 
     async def run(self, system, messages, tools=()):
         request = {
@@ -61,13 +85,17 @@ class LLM:
             ],
             "output_config": {"effort": self._effort},
         }
+        if self._thinking:
+            request["thinking"] = {"type": self._thinking}
         if tools:
             request["tools"] = [t.param() for t in sorted(tools, key=lambda t: t.name)]
         by_name = {t.name: t for t in tools}
         messages = list(messages)
         usage = Counter()
         for step in range(1, self._max_steps + 1):
-            response = await self._client.messages.create(messages=messages, **request)
+            if self.on_request:
+                self.on_request()
+            response, started = await self._stream(messages, request, by_name)
             u = response.usage
             usage["in"] += u.input_tokens
             usage["out"] += u.output_tokens
@@ -77,7 +105,7 @@ class LLM:
             if response.stop_reason != "tool_use":
                 return self._result(text, response.stop_reason, step, usage)
             calls = [b for b in response.content if b.type == "tool_use"]
-            results = await asyncio.gather(*(_call(by_name, b) for b in calls))
+            results = await asyncio.gather(*(started.get(b.id) or _call(by_name, b) for b in calls))
             if any(
                 by_name[c.name].ends_turn and "is_error" not in r
                 for c, r in zip(calls, results)

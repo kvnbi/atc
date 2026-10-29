@@ -55,7 +55,8 @@ def _ramp(airport, text, lat, lon):
     exact = [r for r in airport.ramps if r.name.lower() == text]
     found = exact or [r for r in airport.ramps if text in r.name.lower()]
     if not found:
-        raise ValueError(f"unknown parking {text}")
+        names = ", ".join(sorted({r.name for r in airport.ramps})[:20])
+        raise ValueError(f"unknown parking {text}, available: {names}")
     return min(found, key=lambda r: range_bearing(lat, lon, r.lat, r.lon)[0])
 
 

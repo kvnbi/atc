@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import wave
@@ -10,6 +11,7 @@ from atc.state.models import Position
 from atc.validator import ACRONYMS
 
 RATE_WPM = 200
+MIN_WORDS = 3
 PREFERRED = {
     Position.CLEARANCE: ("Samantha", "Kathy"),
     Position.GROUND: ("Daniel", "Fred"),
@@ -34,6 +36,21 @@ def pronounceable(text):
     return re.sub(r"\b[A-Z]{3,5}\b", lambda m: m[0] if m[0] in ACRONYMS else m[0].lower(), text)
 
 
+def sentences(text):
+    chunks = []
+    for part in re.split(r"(?<=[.!?])\s+", text.strip()):
+        if not part:
+            continue
+        if chunks and len(part.split()) < MIN_WORDS:
+            chunks[-1] += " " + part
+        else:
+            chunks.append(part)
+    if len(chunks) > 1 and len(chunks[0].split()) < MIN_WORDS:
+        chunks[1] = chunks[0] + " " + chunks[1]
+        chunks.pop(0)
+    return chunks
+
+
 async def _run(*args):
     proc = await asyncio.create_subprocess_exec(
         *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
@@ -45,9 +62,34 @@ class Speaker:
     def __init__(self, voices=None):
         self._voices = pick_voices(installed_voices()) if voices is None else voices
         self._queue = asyncio.Queue()
+        self._folder = tempfile.mkdtemp()
+        self._callsign = ""
+        self._prefixes = {}
+        self._pending = None
 
-    def say(self, text, position):
-        self._queue.put_nowait((text, position))
+    async def prepare(self, callsign):
+        self._callsign = callsign.lower()
+        for position in self._voices:
+            path = os.path.join(self._folder, f"prefix-{position.value}.wav")
+            await self.synthesize(path, callsign + ",", position)
+            self._prefixes[position] = path
+
+    def begin(self, position, started=None):
+        if self._pending is None and position in self._prefixes:
+            self._pending = asyncio.get_running_loop().create_future()
+            self._queue.put_nowait((self._pending, position, started))
+
+    def end_turn(self):
+        if self._pending is not None:
+            self._pending.set_result("")
+            self._pending = None
+
+    def say(self, text, position, started=None):
+        if self._pending is not None:
+            future, self._pending = self._pending, None
+            future.set_result(text)
+        else:
+            self._queue.put_nowait((text, position, started))
 
     async def synthesize(self, path, text, position):
         voice = self._voices.get(position)
@@ -70,10 +112,40 @@ class Speaker:
             w.setframerate(radio.RATE)
             w.writeframes(pcm)
 
-    async def run(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = os.path.join(folder, "speech.wav")
-            while True:
-                text, position = await self._queue.get()
-                await self.synthesize(path, text, position)
+    async def _speak(self, folder, source, position, started):
+        ready = asyncio.Queue()
+        prefix = self._prefixes.get(position)
+        pending = isinstance(source, asyncio.Future)
+        if pending:
+            ready.put_nowait(prefix)
+
+        async def produce():
+            text = await source if pending else source
+            if prefix and self._callsign and text.lower().startswith(self._callsign):
+                text = text[len(self._callsign) :].lstrip(" ,.;")
+                if not pending:
+                    ready.put_nowait(prefix)
+            for i, chunk in enumerate(sentences(text)):
+                path = os.path.join(folder, f"{i}.wav")
+                await self.synthesize(path, chunk, position)
+                await ready.put(path)
+            await ready.put(None)
+
+        producer = asyncio.create_task(produce())
+        try:
+            while (path := await ready.get()) is not None:
+                if started:
+                    started()
+                    started = None
                 await _run("afplay", path)
+        finally:
+            producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
+
+    async def run(self):
+        try:
+            while True:
+                text, position, started = await self._queue.get()
+                await self._speak(self._folder, text, position, started)
+        finally:
+            shutil.rmtree(self._folder, ignore_errors=True)

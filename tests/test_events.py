@@ -115,12 +115,13 @@ def test_approach_and_final_handoffs(ksfo, ksea, tmp_path):
     center.at(*offset(ksea.lat, ksea.lon, 60, 0), on_ground=False, alt_agl_ft=20000.0)
     assert center.poll() == []
     center.at(*offset(ksea.lat, ksea.lon, 30, 0))
+    assert keys(center.poll())[0].startswith("handoff:sector:")
     events = center.poll()
     assert keys(events) == ["handoff:approach"] and "KSEA" in events[0].text
     (tmp_path / "b").mkdir()
     approach = World(tmp_path / "b", (ksfo, ksea), "approach")
     approach.at(*offset(ksea.lat, ksea.lon, 12, 0), on_ground=False, alt_agl_ft=2000.0)
-    assert approach.poll() == []
+    assert keys(approach.poll()) == ["approach:clearance"]
     approach.at(*offset(ksea.lat, ksea.lon, 6, 0))
     assert keys(approach.poll()) == ["handoff:final"]
 
@@ -166,7 +167,7 @@ def test_runway_occupied_while_on_final(ksfo, tmp_path):
     events = world.poll()
     assert keys(events) == ["runway:28R:occupied"] and "UAL482" in events[0].text
     world.store.set_traffic([Traffic(id="t1", callsign="UAL482", lat=mid[0], lon=mid[1], alt_msl_ft=900, on_ground=False)])
-    assert world.poll() == []
+    assert keys(world.poll()) == ["landing:28R"]
     world.store.set_traffic([])
     assert world.poll() == []
 
@@ -240,3 +241,68 @@ def test_watch_hands_events_to_the_turn():
 
     asyncio.run(scenario())
     assert heard == ["first", "second", "third"]
+
+
+def test_enroute_sector_changes_hand_off_to_the_next_center(ksfo, tmp_path):
+    from atc.data import centers
+
+    world = World(tmp_path, (ksfo,), "center")
+    lat, lon = 38.5, -121.0
+    world.at(lat, lon, on_ground=False, alt_agl_ft=20000.0, alt_msl_ft=24000.0)
+    assert world.poll() == []
+    assert world.poll() == []
+    world.at(lat, lon + 2.0)
+    events = world.poll()
+    khz = centers.frequency(lat, lon + 2.0)
+    assert keys(events)[0].startswith("handoff:sector:") and f"{khz / 1000:.3f}" in events[0].text
+    assert world.poll() == []
+
+
+def test_departure_handoff_to_center_names_the_sector_frequency(ksfo, tmp_path):
+    from atc.data import centers
+
+    world = World(tmp_path, (ksfo,), "departure")
+    lat, lon = offset(ksfo.lat, ksfo.lon, 36, 0)
+    world.at(lat, lon, on_ground=False, alt_agl_ft=9000.0)
+    events = world.poll()
+    assert keys(events) == ["handoff:center"]
+    assert f"{centers.frequency(lat, lon) / 1000:.3f}" in events[0].text
+
+
+def test_entering_center_does_not_trigger_a_sector_handoff(ksfo, tmp_path):
+    world = World(tmp_path, (ksfo,), "tower")
+    world.at(38.5, -121.0, on_ground=False, alt_agl_ft=20000.0)
+    world.poll()
+    world.watcher._tracker.fixed = "center"
+    assert world.poll() == []
+
+
+def test_approach_clearance_is_requested_once_until_issued(ksfo, ksea, tmp_path):
+    world = World(tmp_path, (ksfo, ksea), "approach")
+    world.at(*offset(ksea.lat, ksea.lon, 20, 0), on_ground=False, alt_agl_ft=9000.0, alt_msl_ft=9000.0)
+    events = world.poll()
+    assert keys(events) == ["approach:clearance"] and "get_procedure" in events[0].text
+    assert world.poll() == []
+    world.notes(clearances=["N123AB cleared ILS runway 16L approach"])
+    assert world.poll() == []
+    world.at(*offset(ksea.lat, ksea.lon, 40, 0))
+    assert world.poll() == []
+
+
+def test_landing_clearance_due_on_clear_final_until_issued(ksfo, tmp_path):
+    world = World(tmp_path, (ksfo,))
+    lat, lon = final_point(ksfo, "28R", 2.0)
+    world.at(lat, lon, on_ground=False, alt_agl_ft=600.0, alt_msl_ft=ksfo.elevation_ft + 600, vertical_speed_fpm=-700.0)
+    events = world.poll()
+    assert keys(events) == ["landing:28R"] and "2.0 nm" in events[0].text
+    issued = World(tmp_path / "issued", (ksfo,)) if (tmp_path / "issued").mkdir() is None else None
+    issued.at(lat, lon, on_ground=False, alt_agl_ft=600.0, alt_msl_ft=ksfo.elevation_ft + 600, vertical_speed_fpm=-700.0)
+    issued.notes(clearances=["N123AB cleared to land runway 28R"])
+    assert issued.poll() == []
+
+
+def test_parallel_runways_resolve_to_the_one_flown(ksfo, tmp_path):
+    world = World(tmp_path, (ksfo,))
+    lat, lon = final_point(ksfo, "28L", 1.5)
+    world.at(lat, lon, on_ground=False, alt_agl_ft=450.0, alt_msl_ft=ksfo.elevation_ft + 450, vertical_speed_fpm=-600.0)
+    assert keys(world.poll()) == ["landing:28L"]

@@ -22,6 +22,7 @@ class Settings:
     api_key: str
     model: str
     effort: str
+    thinking: str
     data_dir: Path
     notes_dir: Path
     xplane_dir: Path
@@ -45,6 +46,7 @@ def get_settings():
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         model=os.environ.get("ATC_MODEL", "claude-sonnet-5-5"),
         effort=os.environ.get("ATC_EFFORT", "low"),
+        thinking=os.environ.get("ATC_THINKING", ""),
         data_dir=_path("ATC_DATA_DIR", ROOT / "data"),
         notes_dir=_path("ATC_NOTES_DIR", ROOT / "notes"),
         xplane_dir=_path("ATC_XPLANE_DIR", "~/X-Plane 12"),
