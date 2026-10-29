@@ -7,7 +7,7 @@ import time
 import anthropic
 
 from atc import notes as flight_notes
-from atc import spoken
+from atc import simbrief, spoken
 from atc.audio.ptt import Recorder, Toggle, utterances
 from atc.bridge.replay import Replay
 from atc.bridge.xplane import XPlane
@@ -43,6 +43,7 @@ def _args(argv):
     parser.add_argument("--position", choices=[p.value for p in Position])
     parser.add_argument("--flight-plan", default="")
     parser.add_argument("--callsign", default="")
+    parser.add_argument("--simbrief", default="")
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--replay", default=str(SAMPLE))
     parser.add_argument("--no-replay", action="store_true")
@@ -52,6 +53,18 @@ def _args(argv):
     parser.add_argument("--speak", action="store_true")
     parser.add_argument("--listen", action="store_true")
     return parser.parse_args(argv)
+
+
+async def _plan(args):
+    if not args.simbrief:
+        return args.flight_plan, args.callsign, _scope(args.flight_plan)
+    try:
+        plan = await asyncio.to_thread(simbrief.load, args.simbrief)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    found = tuple(a for a in (airports.find(code) for code in plan.airports) if a)
+    print(f"[SimBrief plan: {plan.callsign or 'no callsign'}, {plan.origin} to {plan.destination}]")
+    return args.flight_plan or plan.text, args.callsign or plan.callsign, found
 
 
 def _source(args, settings, store):
@@ -68,9 +81,10 @@ def _source(args, settings, store):
 async def main(argv=None):
     args = _args(argv)
     settings = get_settings()
+    flight_plan, callsign, scope = await _plan(args)
     store = StateStore()
-    if args.callsign:
-        store.update_aircraft(callsign=args.callsign)
+    if callsign:
+        store.update_aircraft(callsign=callsign)
     notes_path = settings.notes_dir / "flight.md"
     if args.fresh:
         flight_notes.save(notes_path, flight_notes.Notes())
@@ -100,9 +114,8 @@ async def main(argv=None):
         else:
             current["heard"]()
 
-    scope = _scope(args.flight_plan)
     tracker = Tracker(store, lambda: scope, args.position)
-    builder = ContextBuilder(args.flight_plan)
+    builder = ContextBuilder(flight_plan)
     llm = LLM(settings=settings)
     validator = Validator(lambda: scope)
     tools = core_tools(notes_path, say, validator) + data_tools(store.snapshot)
@@ -185,8 +198,8 @@ async def main(argv=None):
         background.append(asyncio.create_task(watch(Watcher(tracker, store, notes_path, lambda: scope), turn)))
     if speaker:
         background.append(asyncio.create_task(speaker.run()))
-        if args.callsign:
-            background.append(asyncio.create_task(speaker.prepare(spoken.spell(args.callsign))))
+        if callsign:
+            background.append(asyncio.create_task(speaker.prepare(spoken.callsign(callsign))))
     if scope:
         background.append(asyncio.create_task(refresh_weather()))
     toggle = None
@@ -197,7 +210,7 @@ async def main(argv=None):
         print("[loading speech model]")
         await asyncio.to_thread(transcriber.load)
         toggle = Toggle()
-        prompt = vocabulary(scope, args.callsign, args.flight_plan)
+        prompt = vocabulary(scope, callsign, flight_plan)
 
         def held():
             return toggle.down or bool(getattr(source, "ptt_down", False))

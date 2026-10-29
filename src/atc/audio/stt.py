@@ -42,7 +42,9 @@ class Transcriber:
 def vocabulary(airports, callsign="", flight_plan=""):
     parts = []
     if callsign:
-        parts.append(f"{spoken.spell(callsign)}. {spoken.spell(callsign[-3:])}.")
+        parts.append(f"{spoken.callsign(callsign)}.")
+        if callsign.upper().startswith("N"):
+            parts.append(f"{spoken.spell(callsign[-3:])}.")
     if airports:
         first = airports[0]
         ends = [e.name for r in first.runways for e in r.ends]

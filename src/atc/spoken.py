@@ -220,3 +220,25 @@ def taxiway(name):
 def runway(name):
     side = SIDE_WORDS.get(name[-1:].upper())
     return f"{_digits(name[:-1] if side else name)}{' ' + side if side else ''}"
+
+
+TELEPHONY = {
+    "AAL": "American", "UAL": "United", "DAL": "Delta", "SWA": "Southwest", "JBU": "JetBlue",
+    "ASA": "Alaska", "NKS": "Spirit Wings", "FFT": "Frontier Flight", "HAL": "Hawaiian",
+    "SKW": "Skywest", "RPA": "Brickyard", "FDX": "FedEx", "UPS": "UPS", "ACA": "Air Canada",
+    "WJA": "WestJet", "BAW": "Speedbird", "VIR": "Virgin", "EZY": "Easy", "RYR": "Ryanair",
+    "DLH": "Lufthansa", "AFR": "Air France", "KLM": "KLM", "IBE": "Iberia", "SAS": "Scandinavian",
+    "FIN": "Finnair", "SWR": "Swiss", "AUA": "Austrian", "THY": "Turkish", "UAE": "Emirates",
+    "QTR": "Qatari", "ETD": "Etihad", "SIA": "Singapore", "CPA": "Cathay", "ANA": "All Nippon",
+    "JAL": "Japan Air", "QFA": "Qantas", "ANZ": "New Zealand", "KAL": "Korean Air",
+    "AAR": "Asiana", "CCA": "Air China", "AIC": "Air India", "ELY": "El Al", "ETH": "Ethiopian",
+    "AMX": "Aeromexico", "AVA": "Avianca", "TAP": "Air Portugal", "EIN": "Shamrock",
+    "WZZ": "Wizz Air", "LOT": "Lot",
+}
+
+
+def callsign(text):
+    match = re.fullmatch(r"([A-Z]{3})(\d{1,4}[A-Z]{0,2})", text.strip().upper())
+    if match and match[1] in TELEPHONY:
+        return f"{TELEPHONY[match[1]]} {spell(match[2])}"
+    return spell(text)

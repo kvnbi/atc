@@ -61,7 +61,7 @@ class ContextBuilder:
         callsign = snapshot.aircraft.callsign
         parts = [
             f"Position: {snapshot.position.value}, tuned frequency {_freq(snapshot.aircraft.com1_khz)}",
-            *([f"Callsign to speak: {spoken.spell(callsign)}"] if callsign else []),
+            *([f"Callsign to speak: {spoken.callsign(callsign)}"] if callsign else []),
             _aircraft(snapshot.aircraft),
             _traffic(snapshot.aircraft, snapshot.traffic),
         ]
