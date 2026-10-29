@@ -1,0 +1,18 @@
+[project]
+name = "atc"
+version = "0.0.1"
+requires-python = ">=3.11"
+dependencies = ["anthropic>=1.0"]
+
+[project.scripts]
+atc = "atc.main:run"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+atc = ["context/prompts/*.md"]
