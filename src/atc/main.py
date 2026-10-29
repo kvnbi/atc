@@ -10,6 +10,7 @@ from atc.bridge.replay import Replay
 from atc.config import ROOT, get_settings
 from atc.context.builder import ContextBuilder
 from atc.llm.client import LLM
+from atc.llm.data_tools import data_tools
 from atc.llm.tools import core_tools
 from atc.state.models import Position
 from atc.state.store import StateStore
@@ -44,7 +45,7 @@ async def main(argv=None):
 
     builder = ContextBuilder(args.flight_plan)
     llm = LLM(settings=settings)
-    tools = core_tools(notes_path, say)
+    tools = core_tools(notes_path, say) + data_tools(store.snapshot)
     replay = None
     if not args.no_replay:
         replay = asyncio.create_task(Replay.from_file(args.replay).run(store, args.speed))
