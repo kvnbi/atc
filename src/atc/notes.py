@@ -12,6 +12,7 @@ class Notes:
 
 
 _SECTIONS = {f.name.capitalize(): f.name for f in fields(Notes)}
+NAMES = tuple(_SECTIONS.values())
 
 
 def dumps(notes):
@@ -34,6 +35,26 @@ def loads(text):
             if item:
                 current.append(item)
     return notes
+
+
+def patch(notes, ops):
+    missing = []
+    for op in ops:
+        if op["section"] not in NAMES:
+            raise ValueError(f"unknown section {op['section']}")
+        items = getattr(notes, op["section"])
+        text = " ".join(op["text"].split())
+        if op["op"] == "add":
+            if text not in items:
+                items.append(text)
+        elif op["op"] == "remove":
+            if text in items:
+                items.remove(text)
+            else:
+                missing.append(text)
+        else:
+            raise ValueError(f"unknown op {op['op']}")
+    return missing
 
 
 def load(path):
