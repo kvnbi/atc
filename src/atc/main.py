@@ -8,6 +8,7 @@ import anthropic
 
 from atc import notes as flight_notes
 from atc.bridge.replay import Replay
+from atc.bridge.xplane import XPlane
 from atc.config import ROOT, get_settings
 from atc.context.builder import ContextBuilder
 from atc.data import airports
@@ -16,6 +17,7 @@ from atc.llm.data_tools import data_tools
 from atc.llm.tools import core_tools
 from atc.state.models import Position
 from atc.state.store import StateStore
+from atc.state.tracking import Tracker
 from atc.validator import Validator
 
 SAMPLE = ROOT / "samples" / "ground_to_takeoff.jsonl"
@@ -32,8 +34,10 @@ def _scope(flight_plan):
 
 def _args(argv):
     parser = argparse.ArgumentParser(prog="atc")
-    parser.add_argument("--position", choices=[p.value for p in Position], default="ground")
+    parser.add_argument("--position", choices=[p.value for p in Position])
     parser.add_argument("--flight-plan", default="")
+    parser.add_argument("--callsign", default="")
+    parser.add_argument("--live", action="store_true")
     parser.add_argument("--replay", default=str(SAMPLE))
     parser.add_argument("--no-replay", action="store_true")
     parser.add_argument("--speed", type=float, default=1.0)
@@ -41,11 +45,21 @@ def _args(argv):
     return parser.parse_args(argv)
 
 
+def _source(args, settings, store):
+    if args.live:
+        source = XPlane(settings.xplane_host, settings.xplane_port, settings.xplane_listen_port)
+        return source, asyncio.create_task(source.run(store))
+    if args.no_replay:
+        return None, None
+    return None, asyncio.create_task(Replay.from_file(args.replay).run(store, args.speed))
+
+
 async def main(argv=None):
     args = _args(argv)
     settings = get_settings()
     store = StateStore()
-    store.set_position(args.position)
+    if args.callsign:
+        store.update_aircraft(callsign=args.callsign)
     notes_path = settings.notes_dir / "flight.md"
     if args.fresh:
         flight_notes.save(notes_path, flight_notes.Notes())
@@ -55,14 +69,14 @@ async def main(argv=None):
         said.append(text)
         print(f"\n{store.snapshot().position.value.upper()}: {text}\n")
 
+    scope = _scope(args.flight_plan)
+    tracker = Tracker(store, lambda: scope, args.position)
     builder = ContextBuilder(args.flight_plan)
     llm = LLM(settings=settings)
-    scope = _scope(args.flight_plan)
     validator = Validator(lambda: scope)
     tools = core_tools(notes_path, say, validator) + data_tools(store.snapshot)
-    replay = None
-    if not args.no_replay:
-        replay = asyncio.create_task(Replay.from_file(args.replay).run(store, args.speed))
+    source, task = _source(args, settings, store)
+    await asyncio.sleep(0)
     try:
         while True:
             print("> ", end="", flush=True)
@@ -75,10 +89,18 @@ async def main(argv=None):
             if line == "/quit":
                 break
             if line.startswith("/pos "):
+                choice = line[5:].strip()
                 try:
-                    store.set_position(line[5:].strip())
+                    tracker.fixed = None if choice == "auto" else Position(choice)
                 except ValueError as e:
                     print(e)
+                continue
+            if source and not source.connected:
+                print("[no data from X-Plane]")
+                continue
+            if tracker.resolve() is None:
+                khz = store.snapshot().aircraft.com1_khz
+                print(f"[no controller on {khz / 1000:.3f}]" if khz else "[no frequency tuned]")
                 continue
             said.clear()
             validator.begin()
@@ -102,8 +124,9 @@ async def main(argv=None):
                 f"cache read {result.cache_read_tokens} write {result.cache_write_tokens}]"
             )
     finally:
-        if replay:
-            replay.cancel()
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 def run():

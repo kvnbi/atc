@@ -32,7 +32,7 @@ class StateStore:
         self._snapshot = None
 
     def set_position(self, position):
-        position = Position(position)
+        position = None if position is None else Position(position)
         if position is not self._position:
             self._position = position
             self._snapshot = None
