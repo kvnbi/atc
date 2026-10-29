@@ -7,6 +7,7 @@ import time
 import anthropic
 
 from atc import notes as flight_notes
+from atc.audio.ptt import Recorder, Toggle, utterances
 from atc.bridge.replay import Replay
 from atc.bridge.xplane import XPlane
 from atc.config import ROOT, get_settings
@@ -44,12 +45,16 @@ def _args(argv):
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--speak", action="store_true")
+    parser.add_argument("--listen", action="store_true")
     return parser.parse_args(argv)
 
 
 def _source(args, settings, store):
     if args.live:
-        source = XPlane(settings.xplane_host, settings.xplane_port, settings.xplane_listen_port)
+        source = XPlane(
+            settings.xplane_host, settings.xplane_port, settings.xplane_listen_port, settings.ptt_button
+        )
         return source, asyncio.create_task(source.run(store))
     if args.no_replay:
         return None, None
@@ -67,9 +72,18 @@ async def main(argv=None):
         flight_notes.save(notes_path, flight_notes.Notes())
     said = []
 
+    speaker = None
+    if args.speak:
+        from atc.audio.tts import Speaker
+
+        speaker = Speaker()
+
     def say(text):
         said.append(text)
-        print(f"\n{store.snapshot().position.value.upper()}: {text}\n")
+        position = store.snapshot().position
+        print(f"\n{position.value.upper()}: {text}\n")
+        if speaker:
+            speaker.say(text, position)
 
     scope = _scope(args.flight_plan)
     tracker = Tracker(store, lambda: scope, args.position)
@@ -111,7 +125,33 @@ async def main(argv=None):
             )
 
     source, task = _source(args, settings, store)
-    watcher = None if args.quiet else asyncio.create_task(watch(Watcher(tracker, store, notes_path, lambda: scope), turn))
+    background = [task]
+    if not args.quiet:
+        background.append(asyncio.create_task(watch(Watcher(tracker, store, notes_path, lambda: scope), turn)))
+    if speaker:
+        background.append(asyncio.create_task(speaker.run()))
+    toggle = None
+    if args.listen:
+        from atc.audio.stt import Transcriber, vocabulary
+
+        transcriber = Transcriber(settings.stt_model)
+        print("[loading speech model]")
+        await asyncio.to_thread(transcriber.load)
+        toggle = Toggle()
+        prompt = vocabulary(scope, args.callsign, args.flight_plan)
+
+        def held():
+            return toggle.down or bool(getattr(source, "ptt_down", False))
+
+        async def listen():
+            async for pcm in utterances(held, Recorder()):
+                text = await asyncio.to_thread(transcriber.transcribe, pcm, prompt)
+                if text:
+                    print(f"PILOT: {text}")
+                    await turn(call=text)
+
+        background.append(asyncio.create_task(listen()))
+        print("[ready, type /talk then Enter to send, or hold the joystick button]")
     await asyncio.sleep(0)
     try:
         while True:
@@ -119,11 +159,21 @@ async def main(argv=None):
             raw = await asyncio.to_thread(sys.stdin.readline)
             if not raw:
                 break
+            if toggle and toggle.down:
+                toggle.down = False
+                continue
             line = raw.strip()
             if not line:
                 continue
             if line == "/quit":
                 break
+            if line == "/talk":
+                if toggle:
+                    toggle.down = True
+                    print("[recording, press Enter to send]")
+                else:
+                    print("[start with --listen]")
+                continue
             if line.startswith("/pos "):
                 choice = line[5:].strip()
                 try:
@@ -136,10 +186,12 @@ async def main(argv=None):
                 continue
             await turn(call=line)
     finally:
-        for background in (task, watcher):
-            if background:
-                background.cancel()
-                await asyncio.gather(background, return_exceptions=True)
+        running = [t for t in background if t]
+        for t in running:
+            t.cancel()
+        for outcome in await asyncio.gather(*running, return_exceptions=True):
+            if isinstance(outcome, Exception):
+                print(f"[task failed: {outcome!r}]")
 
 
 def run():

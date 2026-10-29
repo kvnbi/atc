@@ -10,7 +10,7 @@ MS_TO_KT = 1.943844
 FPM_PER_MS = 196.85
 TARGETS = 20
 CALLSIGN_CHARS = 7
-OWN_HZ, TRAFFIC_HZ, CALLSIGN_HZ = 5, 2, 1
+OWN_HZ, TRAFFIC_HZ, CALLSIGN_HZ, PTT_HZ = 5, 2, 1, 20
 RESEND_SECONDS = 5.0
 STALE_SECONDS = 3.0
 
@@ -34,8 +34,9 @@ TARGET_BASE = "sim/cockpit2/tcas/targets"
 
 
 class XPlane(asyncio.DatagramProtocol):
-    def __init__(self, host="127.0.0.1", port=49000, listen_port=49001):
+    def __init__(self, host="127.0.0.1", port=49000, listen_port=49001, ptt_button=-1):
         self._address = (host, port)
+        self._ptt = None
         self._listen_port = listen_port
         self._transport = None
         self._store = None
@@ -57,6 +58,13 @@ class XPlane(asyncio.DatagramProtocol):
                 ids["chars"].append(len(self._specs))
                 self._specs.append((f"{TARGET_BASE}/flight_id[{slot * 8 + k}]", CALLSIGN_HZ))
             self._slots[slot] = ids
+        if ptt_button >= 0:
+            self._ptt = len(self._specs)
+            self._specs.append((f"sim/joystick/joystick_button_values[{ptt_button}]", PTT_HZ))
+
+    @property
+    def ptt_down(self):
+        return self._ptt is not None and self._values.get(self._ptt, 0.0) > 0.5
 
     @property
     def connected(self):

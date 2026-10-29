@@ -19,9 +19,10 @@ atc = ["context/prompts/*.md"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+audio = ["faster-whisper>=1.0", "sounddevice>=0.4"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "-m 'not live'"
-markers = ["live: calls the model and costs money"]
+addopts = "-m 'not live and not audio'"
+markers = ["live: calls the model and costs money", "audio: loads the speech model and synthesizes audio"]

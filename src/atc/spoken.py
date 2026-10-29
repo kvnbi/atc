@@ -169,3 +169,45 @@ def taxiways(words):
         if name:
             found.append(name)
     return found
+
+
+DIGIT_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "niner")
+LETTER_WORDS = {letter: word for word, letter in PHONETIC.items()}
+SIDE_WORDS = {"L": "left", "R": "right", "C": "center"}
+DIGIT_CONTEXT = {"squawk", "heading", "runway", "frequency", "contact", "altimeter", "wind", "point"}
+
+
+def _digits(text):
+    return " ".join(DIGIT_WORDS[int(c)] for c in text if c.isdigit())
+
+
+def spell(token):
+    return " ".join(
+        DIGIT_WORDS[int(c)] if c.isdigit() else LETTER_WORDS[c.upper()] for c in token if c.isalnum()
+    )
+
+
+def _altitude(value):
+    thousands, rest = divmod(value, 1000)
+    words = f"{_digits(str(thousands))} thousand"
+    return words + (f" {DIGIT_WORDS[rest // 100]} hundred" if rest else "")
+
+
+def _integer(match):
+    previous = match.string[: match.start()].split()
+    value = int(match[0])
+    if (not previous or previous[-1].lower() not in DIGIT_CONTEXT) and 1000 <= value <= 60000 and value % 100 == 0:
+        return _altitude(value)
+    return _digits(match[0])
+
+
+def normalize(text):
+    text = re.sub(r"\bFL\s?(\d{2,3})\b", lambda m: "flight level " + _digits(m[1]), text, flags=re.I)
+    text = re.sub(r"\bN\d{1,5}[A-Za-z]{0,2}\b", lambda m: spell(m[0]), text, flags=re.I)
+    text = re.sub(r"\b([A-Z]{3,5})(\d)\b", lambda m: f"{m[1]} {DIGIT_WORDS[int(m[2])]}", text)
+    text = re.sub(r"\b(\d{1,2})([LRClrc])\b", lambda m: f"{_digits(m[1])} {SIDE_WORDS[m[2].upper()]}", text)
+    text = re.sub(r"\b(\d+)\.(\d+)\b", lambda m: f"{_digits(m[1])} point {_digits(m[2])}", text)
+    text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text)
+    text = re.sub(r"(?<=\d)-(?=\d)", " ", text)
+    text = re.sub(r"\b\d+\b", _integer, text)
+    return re.sub(r"\s+", " ", text).strip()

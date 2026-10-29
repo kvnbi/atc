@@ -61,8 +61,20 @@ def test_names_exist_in_datarefs_file():
     if not path.is_file():
         pytest.skip("DataRefs.txt not found")
     known = {line.split("\t")[0] for line in path.read_text(errors="ignore").splitlines()}
-    names = {re.sub(r"\[\d+\]$", "", name) for name, _ in xplane.XPlane()._specs}
+    names = {re.sub(r"\[\d+\]$", "", name) for name, _ in xplane.XPlane(ptt_button=3)._specs}
     assert names - known == set()
+
+
+def test_ptt_button_state_follows_the_joystick():
+    bridge = xplane.XPlane(ptt_button=7)
+    name, hz = bridge._specs[bridge._ptt]
+    assert name == "sim/joystick/joystick_button_values[7]" and hz == 20
+    assert not bridge.ptt_down
+    bridge.datagram_received(b"RREF," + struct.pack("<if", bridge._ptt, 1.0), None)
+    assert bridge.ptt_down
+    bridge.datagram_received(b"RREF," + struct.pack("<if", bridge._ptt, 0.0), None)
+    assert not bridge.ptt_down
+    assert xplane.XPlane().ptt_down is False
 
 
 def test_telemetry_and_traffic_round_trip():

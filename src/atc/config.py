@@ -30,6 +30,8 @@ class Settings:
     xplane_listen_port: int
     region: str
     max_tool_steps: int
+    stt_model: str
+    ptt_button: int
 
 
 def _path(name, default):
@@ -51,4 +53,6 @@ def get_settings():
         xplane_listen_port=int(os.environ.get("ATC_XPLANE_LISTEN_PORT", "49001")),
         region=os.environ.get("ATC_REGION", "FAA").upper(),
         max_tool_steps=int(os.environ.get("ATC_MAX_TOOL_STEPS", "6")),
+        stt_model=os.environ.get("ATC_STT_MODEL", "base.en"),
+        ptt_button=int(os.environ.get("ATC_PTT_BUTTON", "-1")),
     )
