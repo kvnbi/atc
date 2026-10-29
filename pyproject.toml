@@ -16,3 +16,12 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 atc = ["context/prompts/*.md"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-m 'not live'"
+markers = ["live: calls the model and costs money"]

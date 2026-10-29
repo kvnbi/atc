@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import re
 import sys
 import time
 
@@ -9,13 +10,24 @@ from atc import notes as flight_notes
 from atc.bridge.replay import Replay
 from atc.config import ROOT, get_settings
 from atc.context.builder import ContextBuilder
+from atc.data import airports
 from atc.llm.client import LLM
 from atc.llm.data_tools import data_tools
 from atc.llm.tools import core_tools
 from atc.state.models import Position
 from atc.state.store import StateStore
+from atc.validator import Validator
 
 SAMPLE = ROOT / "samples" / "ground_to_takeoff.jsonl"
+
+
+def _scope(flight_plan):
+    found = []
+    for icao in re.findall(r"\b[A-Z]{4}\b", flight_plan):
+        airport = airports.find(icao)
+        if airport and airport not in found:
+            found.append(airport)
+    return tuple(found)
 
 
 def _args(argv):
@@ -45,7 +57,9 @@ async def main(argv=None):
 
     builder = ContextBuilder(args.flight_plan)
     llm = LLM(settings=settings)
-    tools = core_tools(notes_path, say) + data_tools(store.snapshot)
+    scope = _scope(args.flight_plan)
+    validator = Validator(lambda: scope)
+    tools = core_tools(notes_path, say, validator) + data_tools(store.snapshot)
     replay = None
     if not args.no_replay:
         replay = asyncio.create_task(Replay.from_file(args.replay).run(store, args.speed))
@@ -67,6 +81,7 @@ async def main(argv=None):
                     print(e)
                 continue
             said.clear()
+            validator.begin()
             system, messages = builder.build(
                 store.snapshot(), flight_notes.load(notes_path), call=line
             )
@@ -77,6 +92,8 @@ async def main(argv=None):
                 print(f"error: {e}")
                 continue
             elapsed = time.perf_counter() - start
+            for text, problems in validator.history:
+                print(f"[rejected: {text!r}: {'; '.join(problems)}]")
             if not said:
                 print("[silence]")
             print(

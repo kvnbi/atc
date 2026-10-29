@@ -22,11 +22,16 @@ class Tool:
         }
 
 
-def transmit_tool(on_transmit):
+def transmit_tool(on_transmit, validator=None):
     async def handler(text):
         text = text.strip()
         if not text:
             raise ValueError("empty transmission")
+        problems = validator.check(text) if validator else ()
+        if problems:
+            if validator.reject(text, problems):
+                raise ValueError("rejected, fix and transmit again: " + "; ".join(problems))
+            text = "Stand by."
         out = on_transmit(text)
         if isawaitable(out):
             await out
@@ -80,5 +85,5 @@ def notes_tool(path):
     )
 
 
-def core_tools(notes_path, on_transmit):
-    return (transmit_tool(on_transmit), notes_tool(notes_path))
+def core_tools(notes_path, on_transmit, validator=None):
+    return (transmit_tool(on_transmit, validator), notes_tool(notes_path))
