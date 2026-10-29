@@ -43,13 +43,13 @@ async def _call(tools, block):
 class LLM:
     __slots__ = ("_client", "_model", "_max_steps", "_max_tokens", "_effort")
 
-    def __init__(self, client=None, settings=None, max_tokens=2048, effort="low"):
+    def __init__(self, client=None, settings=None, max_tokens=2048):
         settings = settings or get_settings()
         self._client = client or AsyncAnthropic(api_key=settings.api_key or None)
         self._model = settings.model
         self._max_steps = settings.max_tool_steps
         self._max_tokens = max_tokens
-        self._effort = effort
+        self._effort = settings.effort
 
     async def run(self, system, messages, tools=()):
         request = {
@@ -73,12 +73,18 @@ class LLM:
             usage["out"] += u.output_tokens
             usage["read"] += u.cache_read_input_tokens or 0
             usage["write"] += u.cache_creation_input_tokens or 0
+            text = "".join(b.text for b in response.content if b.type == "text")
             if response.stop_reason != "tool_use":
-                text = "".join(b.text for b in response.content if b.type == "text")
                 return self._result(text, response.stop_reason, step, usage)
-            messages.append({"role": "assistant", "content": response.content})
             calls = [b for b in response.content if b.type == "tool_use"]
             results = await asyncio.gather(*(_call(by_name, b) for b in calls))
+            if any(
+                by_name[c.name].ends_turn and "is_error" not in r
+                for c, r in zip(calls, results)
+                if c.name in by_name
+            ):
+                return self._result(text, "end_turn", step, usage)
+            messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": list(results)})
         return self._result("", "max_steps", self._max_steps, usage)
 

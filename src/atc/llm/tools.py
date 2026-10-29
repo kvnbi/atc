@@ -11,6 +11,7 @@ class Tool:
     description: str
     schema: dict
     handler: Callable
+    ends_turn: bool = False
 
     def param(self):
         return {
@@ -41,6 +42,7 @@ def transmit_tool(on_transmit):
             "additionalProperties": False,
         },
         handler,
+        ends_turn=True,
     )
 
 
