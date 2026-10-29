@@ -27,6 +27,7 @@ from atc.validator import Validator
 
 SAMPLE = ROOT / "samples" / "ground_to_takeoff.jsonl"
 WEATHER_SECONDS = 300
+WEATHER_WAIT_SECONDS = 4
 
 
 def _scope(flight_plan):
@@ -97,7 +98,7 @@ async def main(argv=None):
         speaker = Speaker()
 
     latency = LatencyLog(settings.data_dir / "latency.jsonl")
-    current = {"watch": None}
+    current = {"watch": None, "proactive": False}
 
     def say(text):
         said.append(text)
@@ -110,19 +111,21 @@ async def main(argv=None):
             return
         watch_.mark("transmit")
         if speaker:
-            speaker.say(text, position, current["heard"])
+            speaker.say(text, position, current["heard"], current["proactive"])
         else:
             current["heard"]()
 
     tracker = Tracker(store, lambda: scope, args.position)
     builder = ContextBuilder(flight_plan)
     llm = LLM(settings=settings)
-    validator = Validator(lambda: scope)
+    validator = Validator(lambda: scope, traffic=lambda: bool(store.snapshot().traffic))
     tools = core_tools(notes_path, say, validator) + data_tools(store.snapshot)
     lock = asyncio.Lock()
 
     forecasts = {}
     summaries = {}
+
+    weather_ready = asyncio.Event()
 
     async def refresh_weather():
         while True:
@@ -134,6 +137,7 @@ async def main(argv=None):
                 except Exception:
                     forecasts.pop(airport.icao, None)
                     summaries.pop(airport.icao, None)
+            weather_ready.set()
             await asyncio.sleep(WEATHER_SECONDS)
 
     async def turn(call=None, event=None, released=None, transcribed=None):
@@ -157,11 +161,11 @@ async def main(argv=None):
                 if record:
                     print(describe(record))
 
-            current["watch"], current["heard"] = watch_, heard
+            current["watch"], current["heard"], current["proactive"] = watch_, heard, event is not None
             llm.on_request = lambda: watch_.mark("model")
             if speaker:
                 llm.on_tool_start = lambda name: name == "transmit" and speaker.begin(
-                    store.snapshot().position, heard
+                    store.snapshot().position, heard, event is not None
                 )
             snapshot = store.snapshot()
             system, messages = builder.build(
@@ -195,7 +199,9 @@ async def main(argv=None):
     source, task = _source(args, settings, store)
     background = [task]
     if not args.quiet:
-        background.append(asyncio.create_task(watch(Watcher(tracker, store, notes_path, lambda: scope), turn)))
+        background.append(asyncio.create_task(
+                watch(Watcher(tracker, store, notes_path, lambda: scope), turn, ready=speaker.wait_idle if speaker else None)
+            ))
     if speaker:
         background.append(asyncio.create_task(speaker.run()))
         if callsign:
@@ -225,6 +231,11 @@ async def main(argv=None):
 
         background.append(asyncio.create_task(listen()))
         print("[ready, type /talk then Enter to send, or hold the joystick button]")
+    if scope:
+        try:
+            await asyncio.wait_for(weather_ready.wait(), WEATHER_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            pass
     await asyncio.sleep(0)
     try:
         while True:

@@ -306,3 +306,28 @@ def test_parallel_runways_resolve_to_the_one_flown(ksfo, tmp_path):
     lat, lon = final_point(ksfo, "28L", 1.5)
     world.at(lat, lon, on_ground=False, alt_agl_ft=450.0, alt_msl_ft=ksfo.elevation_ft + 450, vertical_speed_fpm=-600.0)
     assert keys(world.poll()) == ["landing:28L"]
+
+
+def test_watch_waits_for_a_clear_frequency_before_polling():
+    state = {"clear": False, "polls": 0}
+
+    class Fake:
+        def poll(self):
+            state["polls"] += 1
+            return []
+
+    async def ready():
+        while not state["clear"]:
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        task = asyncio.create_task(watch(Fake(), lambda event: None, interval=0.01, ready=ready))
+        await asyncio.sleep(0.1)
+        blocked = state["polls"]
+        state["clear"] = True
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return blocked
+
+    assert asyncio.run(scenario()) == 0 and state["polls"] > 0

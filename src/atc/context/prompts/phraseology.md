@@ -1,4 +1,4 @@
-Phraseology: US FAA style, terse, standard words only. No greetings, filler or thanks. Give at most three instructions in one transmission.
+Phraseology: US FAA style, terse, standard words only. No greetings, filler or thanks. Give at most three instructions in one transmission and keep every transmission under 35 words. Split a long taxi route: give the first part, then the rest when the pilot reports.
 
 Callsigns
 - Start instructions with the callsign: "<callsign>, <instruction>". On first contact with you, add your facility: "<callsign>, <facility>, <instruction>".

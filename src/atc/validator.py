@@ -12,6 +12,8 @@ LEAKS = re.compile(r"not available|unavailable|no data|as an ai|language model",
 EXTRA_FREQUENCIES = frozenset({121500, 122750})
 MAX_ALTITUDE = 60000
 KINDS = {"departure": "SID", "arrival": "STAR"}
+TRAFFIC = re.compile(r"(?<!no )\b(?:traffic|vehicles?)\b", re.I)
+MAX_WORDS = 40
 
 
 def _procedures(tokens, words):
@@ -29,11 +31,12 @@ def _is_fix(token):
 
 
 class Validator:
-    __slots__ = ("_scope", "_retries", "_rejected", "history")
+    __slots__ = ("_scope", "_retries", "_traffic", "_rejected", "history")
 
-    def __init__(self, scope=lambda: (), retries=1):
+    def __init__(self, scope=lambda: (), retries=1, traffic=None):
         self._scope = scope
         self._retries = retries
+        self._traffic = traffic
         self.begin()
 
     def begin(self):
@@ -57,6 +60,10 @@ class Validator:
             )
         if LEAKS.search(text):
             problems.append("do not mention missing data")
+        if self._traffic is not None and not self._traffic() and TRAFFIC.search(text):
+            problems.append("no traffic is in the data, never report traffic or vehicles")
+        if len(text.split()) > MAX_WORDS:
+            problems.append(f"too long, use at most {MAX_WORDS} words and give the rest after the pilot reports")
         problems += self._numbers(words, max((a.transition_alt for a in airports), default=0))
         problems += self._names(tokens, words, airports)
         if airports:

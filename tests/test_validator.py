@@ -77,3 +77,19 @@ def test_transmit_retry_then_stand_by(validator):
     good = "Cessna three alpha bravo, runway two eight right, cleared to land."
     asyncio.run(tool.handler(good))
     assert spoken[-1] == good
+
+
+def test_traffic_reports_need_traffic_in_the_data(ksfo):
+    claim = "Cessna three alpha bravo, hold position, traffic on the ground ahead."
+    assert Validator(lambda: (ksfo,), traffic=lambda: False).check(claim)[0].startswith("no traffic is in the data")
+    assert Validator(lambda: (ksfo,), traffic=lambda: True).check(claim) == []
+    assert Validator(lambda: (ksfo,)).check(claim) == []
+    quiet = Validator(lambda: (ksfo,), traffic=lambda: False)
+    assert quiet.check("Cessna three alpha bravo, no traffic reported, runway two eight right, cleared to land.") == []
+    assert quiet.check("Cessna three alpha bravo, vehicle on the runway, go around.")
+
+
+def test_overlong_transmissions_are_rejected():
+    short = " ".join(["word"] * 40)
+    assert Validator().check(short) == []
+    assert "too long" in Validator().check(short + " extra")[0]

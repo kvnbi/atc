@@ -34,7 +34,7 @@ def _traffic(aircraft, traffic):
         f"{'ground' if t.on_ground else 'air'}"
         for nm, brg, t in rows[:MAX_TRAFFIC]
     ]
-    return "Traffic (nearest first):\n" + "\n".join(lines) if lines else "Traffic: none"
+    return "Traffic (nearest first):\n" + "\n".join(lines) if lines else "Traffic: none. Never mention traffic."
 
 
 def _notes(notes):

@@ -215,3 +215,70 @@ def test_opening_the_callsign_early_speaks_it_before_the_text_exists():
     assert "again" not in names
     assert [e for e in events if e[0] == "say"] == [("say", "taxi via charlie.")]
     assert [e[1] for e in events if e[0] == "play"] == ["prefix-ground.wav", "0.wav", "prefix-ground.wav"]
+
+
+def run_speaker(script, voices=None, stale=0.05):
+    plays = []
+
+    async def fake_run(*args):
+        if args[0] == "say":
+            with wave.open(args[args.index("-o") + 1], "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(radio.RATE)
+                w.writeframes(bytes(3200))
+        else:
+            await asyncio.sleep(0.15)
+            plays.append(os.path.basename(args[1]))
+
+    original, original_stale = tts._run, tts.STALE_SECONDS
+    tts._run, tts.STALE_SECONDS = fake_run, stale
+
+    async def scenario():
+        speaker = tts.Speaker({Position.GROUND: "Daniel"} if voices is None else voices)
+        task = asyncio.create_task(speaker.run())
+        await script(speaker)
+        await asyncio.wait_for(speaker.wait_idle(), 5)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return speaker
+
+    try:
+        speaker = asyncio.run(scenario())
+    finally:
+        tts._run, tts.STALE_SECONDS = original, original_stale
+    return plays, speaker
+
+
+def test_stale_proactive_calls_are_dropped_but_replies_never_are():
+    async def script(speaker):
+        speaker.say("Cessna three alpha bravo, taxi via charlie.", Position.GROUND)
+        speaker.say("Cessna three alpha bravo, say again the readback.", Position.GROUND, proactive=True)
+        speaker.say("Cessna three alpha bravo, contact tower.", Position.GROUND)
+
+    plays, speaker = run_speaker(script)
+    assert len(plays) == 2 and speaker._outstanding == 0
+
+
+def test_a_dropped_opening_ignores_the_text_that_follows():
+    async def script(speaker):
+        await speaker.prepare("november one two three alpha bravo")
+        speaker.say("Cessna three alpha bravo, taxi via charlie.", Position.GROUND)
+        speaker.begin(Position.GROUND, proactive=True)
+        await asyncio.sleep(0.25)
+        speaker.say("November one two three alpha bravo, contact departure.", Position.GROUND, proactive=True)
+        speaker.begin(Position.GROUND, proactive=True)
+        speaker.end_turn()
+
+    plays, speaker = run_speaker(script)
+    assert plays.count("prefix-ground.wav") <= 1 and len(plays) >= 1
+    assert speaker._outstanding == 0 and speaker._pending is None
+
+
+def test_wait_idle_returns_once_everything_has_been_spoken():
+    async def script(speaker):
+        speaker.say("Cessna three alpha bravo, taxi via charlie.", Position.GROUND)
+        assert speaker._outstanding == 1
+
+    plays, speaker = run_speaker(script, stale=60)
+    assert len(plays) == 1 and speaker._outstanding == 0

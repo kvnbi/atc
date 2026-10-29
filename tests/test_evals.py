@@ -27,7 +27,7 @@ async def run(case, airport, tmp_path):
     path = tmp_path / "flight.md"
     flight_notes.save(path, case.notes)
     said = []
-    validator = Validator(lambda: (airport,))
+    validator = Validator(lambda: (airport,), traffic=lambda: bool(store.snapshot().traffic))
     tools = core_tools(path, said.append, validator) + data_tools(store.snapshot)
     system, messages = ContextBuilder(FLIGHT_PLAN).build(store.snapshot(), case.notes, call=case.call)
     await LLM(settings=get_settings()).run(system, messages, tools)

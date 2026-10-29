@@ -313,9 +313,11 @@ class Watcher:
                         )
 
 
-async def watch(watcher, turn, interval=1.0):
+async def watch(watcher, turn, interval=1.0, ready=None):
     while True:
         try:
+            if ready:
+                await ready()
             for event in watcher.poll():
                 await turn(event=event.text)
         except Exception as e:

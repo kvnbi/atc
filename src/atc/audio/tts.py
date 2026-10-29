@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import wave
 
 from atc.audio import radio
@@ -12,6 +13,8 @@ from atc.validator import ACRONYMS
 
 RATE_WPM = 200
 MIN_WORDS = 3
+STALE_SECONDS = 6.0
+IDLE_POLL_SECONDS = 0.1
 PREFERRED = {
     Position.CLEARANCE: ("Samantha", "Kathy"),
     Position.GROUND: ("Daniel", "Fred"),
@@ -66,6 +69,11 @@ class Speaker:
         self._callsign = ""
         self._prefixes = {}
         self._pending = None
+        self._outstanding = 0
+
+    async def wait_idle(self):
+        while self._outstanding:
+            await asyncio.sleep(IDLE_POLL_SECONDS)
 
     async def prepare(self, callsign):
         self._callsign = callsign.lower()
@@ -74,22 +82,28 @@ class Speaker:
             await self.synthesize(path, callsign + ",", position)
             self._prefixes[position] = path
 
-    def begin(self, position, started=None):
+    def _enqueue(self, source, position, started, proactive):
+        self._outstanding += 1
+        self._queue.put_nowait((source, position, started, proactive, time.monotonic()))
+
+    def begin(self, position, started=None, proactive=False):
         if self._pending is None and position in self._prefixes:
             self._pending = asyncio.get_running_loop().create_future()
-            self._queue.put_nowait((self._pending, position, started))
+            self._enqueue(self._pending, position, started, proactive)
 
     def end_turn(self):
         if self._pending is not None:
-            self._pending.set_result("")
+            if not self._pending.done():
+                self._pending.set_result("")
             self._pending = None
 
-    def say(self, text, position, started=None):
+    def say(self, text, position, started=None, proactive=False):
         if self._pending is not None:
             future, self._pending = self._pending, None
-            future.set_result(text)
+            if not future.done():
+                future.set_result(text)
         else:
-            self._queue.put_nowait((text, position, started))
+            self._enqueue(text, position, started, proactive)
 
     async def synthesize(self, path, text, position):
         voice = self._voices.get(position)
@@ -145,7 +159,14 @@ class Speaker:
     async def run(self):
         try:
             while True:
-                text, position, started = await self._queue.get()
-                await self._speak(self._folder, text, position, started)
+                source, position, started, proactive, queued = await self._queue.get()
+                try:
+                    if proactive and time.monotonic() - queued > STALE_SECONDS:
+                        if isinstance(source, asyncio.Future) and not source.done():
+                            source.set_result("")
+                        continue
+                    await self._speak(self._folder, source, position, started)
+                finally:
+                    self._outstanding -= 1
         finally:
             shutil.rmtree(self._folder, ignore_errors=True)
